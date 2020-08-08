@@ -35,13 +35,13 @@ import georegression.struct.point.Point3D_F64;
 import georegression.struct.se.Se3_F64;
 import georegression.transform.se.SePointOps_F64;
 import lombok.Getter;
+import org.ddogleg.struct.FastAccess;
 import org.ddogleg.struct.FastQueue;
 import org.ddogleg.struct.VerbosePrint;
 import org.ejml.data.DMatrixRMaj;
 
 import javax.annotation.Nullable;
 import java.io.PrintStream;
-import java.util.List;
 import java.util.Set;
 
 import static boofcv.misc.BoofMiscOps.assertBoof;
@@ -210,7 +210,7 @@ public class ProjectiveToMetricReconstruction implements VerbosePrint {
 
 		// Save the upgraded metric calibration for each camera
 		DMatrixRMaj K = new DMatrixRMaj(3,3);
-		List<SelfCalibrationLinearDualQuadratic.Intrinsic> solutions = selfCalib.getSolutions();
+		FastAccess<SelfCalibrationLinearDualQuadratic.Intrinsic> solutions = selfCalib.getSolutions();
 		for (int viewIdx = 0; viewIdx < graph.viewList.size(); viewIdx++) {
 			SelfCalibrationLinearDualQuadratic.Intrinsic intrinsic = solutions.get(viewIdx);
 			SceneWorkingGraph.View wv = graph.viewList.get(viewIdx);
