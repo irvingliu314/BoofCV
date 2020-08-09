@@ -26,7 +26,7 @@ import org.ddogleg.struct.FastQueue;
  *
  * @author Peter Abeles
  */
-public class AssociatedTupleDN {
+public class AssociatedTupleDN implements AssociatedTuple {
 	/** Set of associated observations */
 	public final FastQueue<Point2D_F64> p;
 
@@ -38,26 +38,32 @@ public class AssociatedTupleDN {
 		this(0);
 	}
 
+	@Override
 	public double getX( int index ) {
 		return p.data[index].x;
 	}
 
+	@Override
 	public double getY( int index ) {
 		return p.data[index].y;
 	}
 
+	@Override
 	public Point2D_F64 get( int index ) {
 		return p.data[index];
 	}
 
+	@Override
 	public void set( int index , double x , double y ) {
 		p.data[index].set(x,y);
 	}
 
+	@Override
 	public void set( int index , Point2D_F64 src ) {
 		p.data[index].set(src);
 	}
 
+	@Override
 	public int size() {
 		return p.size;
 	}
@@ -68,7 +74,8 @@ public class AssociatedTupleDN {
 		p.resize(newSize);
 	}
 
-	public void setTo( AssociatedTupleDN src ) {
+	@Override
+	public void setTo( AssociatedTuple src ) {
 		p.resize(src.size());
 
 		for (int i = 0; i < p.size; i++) {

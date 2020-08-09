@@ -27,7 +27,7 @@ import static boofcv.misc.BoofMiscOps.assertBoof;
  *
  * @author Peter Abeles
  */
-public class AssociatedTupleN {
+public class AssociatedTupleN implements AssociatedTuple {
 	/** Set of associated observations */
 	public final Point2D_F64[] p;
 
@@ -38,35 +38,49 @@ public class AssociatedTupleN {
 		}
 	}
 
+	public AssociatedTupleN( final Point2D_F64 ...src) {
+		p = new Point2D_F64[src.length];
+		for (int i = 0; i < src.length; i++) {
+			p[i] = src[i].copy();
+		}
+	}
+
+	@Override
 	public double getX( int index ) {
 		return p[index].x;
 	}
 
+	@Override
 	public double getY( int index ) {
 		return p[index].y;
 	}
 
+	@Override
 	public Point2D_F64 get( int index ) {
 		return p[index];
 	}
 
+	@Override
 	public void set( int index , double x , double y ) {
 		p[index].set(x,y);
 	}
 
+	@Override
 	public void set( int index , Point2D_F64 src ) {
 		p[index].set(src);
 	}
 
+	@Override
 	public int size() {
 		return p.length;
 	}
 
-	public void setTo( AssociatedTupleN src ) {
+	@Override
+	public void setTo( AssociatedTuple src ) {
 		assertBoof(src.size()== size());
 
 		for (int i = 0; i < p.length; i++) {
-			p[i].setTo(src.p[i]);
+			p[i].setTo(src.get(i));
 		}
 	}
 }
