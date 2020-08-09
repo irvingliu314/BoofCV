@@ -18,14 +18,23 @@
 
 package boofcv.alg.sfm.structure2;
 
+import boofcv.abst.geo.TriangulateNViewsMetric;
+import boofcv.abst.geo.bundle.BundleAdjustment;
+import boofcv.abst.geo.bundle.SceneObservations;
+import boofcv.abst.geo.bundle.SceneStructureMetric;
+import boofcv.alg.distort.pinhole.PinholePtoN_F64;
 import boofcv.alg.geo.MultiViewOps;
 import boofcv.alg.geo.PerspectiveOps;
 import boofcv.alg.geo.selfcalib.TwoViewToCalibratingHomography;
 import boofcv.alg.sfm.structure2.PairwiseImageGraph2.Motion;
 import boofcv.alg.sfm.structure2.PairwiseImageGraph2.View;
+import boofcv.misc.BoofMiscOps;
+import boofcv.misc.ConfigConverge;
 import boofcv.struct.calib.CameraPinhole;
 import boofcv.struct.geo.AssociatedPair;
 import boofcv.struct.geo.AssociatedTriple;
+import georegression.struct.point.Point2D_F64;
+import georegression.struct.point.Point3D_F64;
 import georegression.struct.se.Se3_F64;
 import lombok.Getter;
 import lombok.Setter;
@@ -74,6 +83,19 @@ public class MetricExpandByOneView implements VerbosePrint {
 	// If not null then print debugging information
 	PrintStream verbose;
 
+	/** The estimated scene structure. This the final estimated scene state */
+	protected final @Getter	SceneStructureMetric structure = new SceneStructureMetric(true);
+	protected final @Getter SceneObservations observations = new SceneObservations();
+	protected final @Getter BundleAdjustment<SceneStructureMetric> sba=null;
+
+	protected final @Getter TriangulateNViewsMetric triangulator=null;
+
+	protected final List<Point2D_F64> pixelNorms = BoofMiscOps.createListFilled(3,Point2D_F64::new);
+	protected final List<Se3_F64> listMotion = new ArrayList<>();
+	protected final PinholePtoN_F64 normalize1 = new PinholePtoN_F64();
+	protected final PinholePtoN_F64 normalize2 = new PinholePtoN_F64();
+	protected final PinholePtoN_F64 normalize3 = new PinholePtoN_F64();
+
 	//------------------------- Local work space
 
 	// Storage fort he two selected connections with known cameras
@@ -86,9 +108,21 @@ public class MetricExpandByOneView implements VerbosePrint {
 	DMatrixRMaj K2 = new DMatrixRMaj(3,3);
 	FastQueue<AssociatedPair> pairs = new FastQueue<>(AssociatedPair::new);
 
+	// Found Se3 from view-1 to target
+	Se3_F64 view1_to_view1 = new Se3_F64();
+	Se3_F64 view1_to_view2 = new Se3_F64();
+	Se3_F64 view1_to_target = new Se3_F64();
+	// K calibration matrix for target view
+	DMatrixRMaj K_target = new DMatrixRMaj(3,3);
 
 	// candidates for being used as known connections
 	List<Motion> validCandidates = new ArrayList<>();
+
+	public MetricExpandByOneView() {
+		listMotion.add(view1_to_view1);
+		listMotion.add(view1_to_view2);
+		listMotion.add(view1_to_target);
+	}
 
 	/**
 	 * Attempts to estimate the camera model in the global projective space for the specified view
@@ -142,33 +176,82 @@ public class MetricExpandByOneView implements VerbosePrint {
 		if (!computeCalibratingHomography())
 			return false;
 
-		// TODO transform from projective to metric cameras
+		// Find the metric upgrade of the target
+		DMatrixRMaj H_cal = projectiveHomography.getCalibrationHomography();
+		MultiViewOps.projectiveToMetric(utils.P3,H_cal, view1_to_target,K_target);
+		PerspectiveOps.matrixToPinhole(K_target,0,0,workGraph.lookupView(utils.viewC.id).pinhole);
+		MultiViewOps.projectiveToMetricKnownK(utils.P2,H_cal,K2,view1_to_view2);
 
-		// TODO compute 3D location of points by triangulation
-		// TODO reject if excessively large errors
+		// Refine using bundle adjustment, if configured to do so
+		if( utils.configConvergeSBA.maxIterations > 0 ) {
+			refineWithBundleAdjustment(workGraph);
+		}
 
-		// TODO refine everything with SBA
-
-
-		// TODO save results into the work graph?
-
-//		// Improve the fit using bundle adjustment. This will reduce the rate at which errors are built up since
-//		// It's important to optimize in the local frame since numbers involved will not be too large or small
-//		// NOTE: Still might not be a bad idea to adjust the scale of everything first
-//		// The lines below convert the known camera frames from global into local frame
-//		CommonOps_DDRM.invert(localToGlobal,globalToLocal);
-//		CommonOps_DDRM.mult(workGraph.lookupView(utils.viewB.id).projective,globalToLocal,utils.P2);
-//		CommonOps_DDRM.mult(workGraph.lookupView(utils.viewC.id).projective,globalToLocal,utils.P3);
-//
-//		// fix cameras P2 and P3 and let everything else float
-//		utils.initializeSbaSceneThreeView(false);
-//		utils.initializeSbaObservationsThreeView();
-//		utils.refineWithBundleAdjustment();
-//
-//		// Convert the refined results into global projective frame
-//		CommonOps_DDRM.mult(utils.structure.getViews().get(0).worldToView,localToGlobal,cameraMatrix);
+		// Convert local coordinate into world coordinates for the view's pose
+		Se3_F64 world_to_view1 = workGraph.views.get(utils.seed.id).world_to_view;
+		Se3_F64 world_to_target = workGraph.views.get(utils.viewC.id).world_to_view;
+		world_to_view1.concat(view1_to_target,world_to_target);
 
 		return true;
+	}
+
+	private void refineWithBundleAdjustment(SceneWorkingGraph workGraph) {
+		SceneWorkingGraph.View wview1 = workGraph.lookupView(utils.seed.id);
+		SceneWorkingGraph.View wview2 = workGraph.lookupView(utils.viewB.id);
+		SceneWorkingGraph.View wview3 = workGraph.lookupView(utils.viewC.id);
+
+		// configure camera pose and intrinsics
+		List<AssociatedTriple> triples = utils.inliersThreeView;
+		final int numFeatures = triples.size();
+		structure.initialize(3,3,numFeatures);
+		observations.initialize(3);
+		observations.getView(0).resize(numFeatures);
+		observations.getView(1).resize(numFeatures);
+		observations.getView(2).resize(numFeatures);
+
+		structure.setCamera(0,false,wview1.pinhole);
+		structure.setCamera(1,false,wview2.pinhole);
+		structure.setCamera(2,false,wview3.pinhole);
+		structure.setView(0,true,view1_to_view1);
+		structure.setView(1,true,view1_to_view2);
+		structure.setView(2,false,view1_to_target);
+
+		// Add observations and 3D feature locations
+		normalize1.set(wview1.pinhole);
+		normalize2.set(wview2.pinhole);
+		normalize3.set(wview3.pinhole);
+
+		SceneObservations.View viewObs1 = observations.getView(0);
+		SceneObservations.View viewObs2 = observations.getView(1);
+		SceneObservations.View viewObs3 = observations.getView(2);
+
+		Point3D_F64 foundX = new Point3D_F64();
+		for (int featIdx = 0; featIdx < numFeatures; featIdx++) {
+			AssociatedTriple a = triples.get(featIdx);
+			viewObs1.set(featIdx,(float)a.p1.x, (float)a.p1.y);
+			viewObs2.set(featIdx,(float)a.p2.x, (float)a.p2.y);
+			viewObs3.set(featIdx,(float)a.p3.x, (float)a.p3.y);
+
+			normalize1.compute(a.p1.x,a.p1.y,pixelNorms.get(0));
+			normalize2.compute(a.p2.x,a.p2.y,pixelNorms.get(1));
+			normalize3.compute(a.p3.x,a.p3.y,pixelNorms.get(2));
+
+			if( !triangulator.triangulate(pixelNorms,listMotion,foundX) ) {
+				throw new RuntimeException("This should be handled");
+			}
+			// TODO also check to see if it appears behind the camera
+			structure.setPoint(featIdx,foundX.x,foundX.y,foundX.z,1.0);
+		}
+
+		// Refine
+		ConfigConverge converge = utils.configConvergeSBA;
+		sba.configure(converge.ftol,converge.gtol,converge.maxIterations);
+		sba.setParameters(structure,observations);
+		if( !sba.optimize(structure) )
+			throw new RuntimeException("Handle this");
+
+		// copy results for output
+		view1_to_target.set(structure.views.get(2).worldToView);
 	}
 
 	/**
@@ -180,8 +263,8 @@ public class MetricExpandByOneView implements VerbosePrint {
 		MultiViewOps.projectiveToFundamental(utils.P2, F21);
 		projectiveHomography.initialize(F21,utils.P2);
 
-		PerspectiveOps.pinholeToMatrix(workGraph.lookupView(utils.viewB.id).pinhole, K1);
-		PerspectiveOps.pinholeToMatrix(workGraph.lookupView(utils.viewC.id).pinhole, K2);
+		PerspectiveOps.pinholeToMatrix(workGraph.lookupView(utils.seed.id).pinhole, K1);
+		PerspectiveOps.pinholeToMatrix(workGraph.lookupView(utils.viewB.id).pinhole, K2);
 
 		List<AssociatedTriple> triples = utils.ransac.getMatchSet();
 		pairs.resize(triples.size());
